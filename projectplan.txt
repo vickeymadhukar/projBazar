@@ -1,0 +1,1363 @@
+﻿================================================================================
+  PROJECT MARKETPLACE — DETAILED DEVELOPMENT PLAN
+  Stack: MERN + Redis Pub/Sub + Socket.io + Cloudinary (S3-ready)
+  Auth: Auth0 + JWT in HttpOnly Cookies
+  Document version: 2.0
+================================================================================
+
+
+TABLE OF CONTENTS
+-----------------
+1.  Project Overview
+2.  Core Features Summary
+3.  Tech Stack & Tools
+4.  MongoDB Schemas
+5.  Listing Template System
+6.  Folder Structure (Backend + Frontend)
+7.  API Route Map
+8.  Phase 1 — Core Listings & Auth
+9.  Phase 2 — Real-time Messaging & Negotiation
+10. Phase 3 — Transaction & Secure Delivery
+11. Phase 4 — Discovery, Trust & Scale
+12. Redis Architecture (Pub/Sub + Cache)
+13. Socket.io Architecture
+14. Auth0 + JWT Cookie Architecture
+15. Cloudinary Strategy (S3 Migration Path)
+16. Scalability & Future-proofing Guide
+17. Categories & Listing Types
+18. Deployment Plan
+19. Environment Variables Reference
+
+
+
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+
+Name idea: ProjBazaar / DevDeal / StackSell (TBD)
+
+
+A peer-to-peer marketplace where:
+  - SELLERS list projects, notes, PYQs, or syllabi with images, description,
+    tech stack, live demo link, and a price.
+  - BUYERS browse listings by category, view details, and connect with sellers.
+  - Both parties negotiate price via real-time chat.
+  - On agreement, buyer pays → seller delivers file securely → both confirmed.
+
+
+Target users:
+  - College students selling projects, notes, PYQs to juniors.
+  - Developers selling side projects or boilerplate code.
+  - Tutors selling subject-wise study material.
+
+
+Monetization (future):
+  - Platform takes a % cut from each successful transaction.
+  - Premium listing placement (featured/boosted listings).
+
+
+
+
+================================================================================
+2. CORE FEATURES SUMMARY
+================================================================================
+
+
+Authentication
+  - Auth0 handles all login/signup (email+password, Google, GitHub via Auth0)
+  - On login: Auth0 issues a JWT → backend verifies it → sets HttpOnly cookie
+  - Cookie is sent automatically on every request (no localStorage token handling)
+  - Role stored in MongoDB User doc, synced from Auth0 user metadata
+  - Role: buyer, seller (same user can be both), admin
+
+
+Listings
+  - Create listing with: title, description, category, domain/subject,
+    tech stack tags, price, images (up to 5), optional live link, optional
+    GitHub link, optional preview file (PDF/image)
+  - Edit and delete own listings
+  - Mark listing as sold / available
+
+
+Browse & Discovery
+  - Browse all listings with pagination
+  - Filter by: category, domain, tech stack, price range, institution
+  - Search by keyword (title, description, tags)
+  - Sort by: newest, price low-high, price high-low, most viewed
+
+
+Messaging & Negotiation
+  - Buyer clicks "Connect with Seller" on a listing
+  - A private conversation thread is created (buyer + seller + listing ref)
+  - Real-time chat via Socket.io
+  - Buyer can send an Offer (price + message)
+  - Seller can Accept / Reject / Counter-offer
+  - All messages persisted in MongoDB
+
+
+Transaction & Delivery
+  - On offer accepted: buyer proceeds to payment (Razorpay)
+  - Payment held until buyer confirms delivery
+  - On payment success: seller uploads/confirms the delivery file
+  - Buyer receives a time-limited Cloudinary signed URL for download
+  - Buyer clicks "Confirm Receipt" → payment released to seller
+  - Both get a transaction confirmation notification
+  NOTE: Private delivery files use Cloudinary signed URLs (short expiry).
+  Migration to AWS S3 private bucket is straightforward later — only
+  cloudinary.service.js needs to be swapped out, all other code stays same.
+
+
+Reviews & Trust
+  - After successful transaction, buyer can rate seller (1–5 stars + comment)
+  - Seller profile shows average rating and review count
+  - Verified Seller badge (admin granted)
+
+
+Admin Panel
+  - View all listings, users, transactions
+  - Flag and remove inappropriate listings
+  - Grant/revoke seller verification
+
+
+
+
+================================================================================
+3. TECH STACK & TOOLS
+================================================================================
+
+
+BACKEND
+  - Runtime      : Node.js (v18+)
+  - Framework    : Express.js
+  - Database     : MongoDB (Atlas) + Mongoose ODM
+  - Cache/PubSub : Redis (Upstash for managed, or local for dev)
+  - Realtime     : Socket.io
+  - Auth         : Auth0 (auth0/express-openid-connect or manual JWT verify)
+                   JWT stored in HttpOnly, Secure, SameSite=Strict cookie
+  - File Storage : Cloudinary (current) → AWS S3 (future, drop-in swap)
+  - File upload  : Multer (memory storage) → Cloudinary SDK
+  - Email        : Nodemailer (Gmail SMTP or Resend)
+  - Payment      : Razorpay Node SDK
+  - Validation   : Joi or express-validator
+  - Env          : dotenv
+
+
+FRONTEND
+  - Framework    : React (Vite)
+  - Routing      : React Router v6
+  - State        : Zustand (lightweight, perfect for this scale)
+  - Data fetch   : Axios (withCredentials: true for cookies) + React Query
+  - Realtime     : socket.io-client
+  - Auth         : @auth0/auth0-react (Auth0 React SDK)
+  - Styling      : Tailwind CSS
+  - File upload  : react-dropzone
+  - Forms        : React Hook Form + Zod
+  - Payments     : Razorpay checkout.js (CDN script)
+  - Notifications: react-hot-toast
+
+
+DEV TOOLS
+  - Postman (API testing — send cookies via cookie jar)
+  - MongoDB Compass (local DB GUI)
+  - Redis Insight (Redis GUI)
+  - ESLint + Prettier
+  - Auth0 Dashboard (manage apps, rules, user metadata)
+
+
+
+
+================================================================================
+4. MONGODB SCHEMAS
+================================================================================
+
+
+---- User ----
+{
+  _id            : ObjectId,
+  auth0Id        : String (required, unique),  // Auth0 'sub' claim e.g. "auth0|64abc..."
+  name           : String (required),
+  email          : String (required, unique),
+  avatar         : String (Cloudinary URL),
+  bio            : String,
+  institution    : String,         // college/school name
+  role           : ['buyer','seller','admin'] (default: buyer),
+  isVerifiedSeller: Boolean (default: false),
+  razorpayAccountId: String,       // for payouts (Phase 3)
+  totalSales     : Number (default: 0),
+  averageRating  : Number (default: 0),
+  reviewCount    : Number (default: 0),
+  createdAt      : Date,
+  updatedAt      : Date
+}
+NOTE: No password field — Auth0 owns credentials entirely.
+On first login via Auth0, backend auto-creates the User doc using the
+auth0Id from the JWT 'sub' claim. Subsequent logins just look up by auth0Id.
+
+
+---- Listing ----
+{
+  _id            : ObjectId,
+  seller         : ObjectId (ref: User),
+
+
+  // ── Section 1: Basic Info (always required) ──
+  title          : String (required),
+  tagline        : String,             // one-liner shown on listing card
+  category       : Enum [
+                    'dev-project',
+                    'college-notes',
+                    'school-notes',
+                    'pyq',
+                    'syllabus'
+                   ],
+  domain         : String,             // "Web Dev", "ML", "Physics", "Maths"
+  subject        : String,             // for notes/pyq: "Operating Systems"
+  institution    : String,             // "VIT Bhopal", "CBSE"
+  price          : Number (required, min: 0),
+  isFree         : Boolean (default: false),
+
+
+  // ── Section 2: Media (images and/or video — both optional but at least one required) ──
+  images         : [{
+    url          : String,             // Cloudinary URL
+    publicId     : String,             // for deletion
+    caption      : String              // optional caption per image
+  }],                                  // max 10, each max 5MB
+  videos         : [{
+    url          : String,             // Cloudinary video URL
+    publicId     : String,
+    thumbnail    : String,             // auto-generated by Cloudinary
+    caption      : String,
+    durationSecs : Number              // stored after Cloudinary processes upload
+  }],                                  // max 2 videos, each max 100MB
+  // Validation rule: images.length > 0 OR videos.length > 0 (at least one required)
+  // Seller can skip images and only upload a demo video, or skip video and only images
+
+
+  // ── Section 3: Description (rich content) ──
+  description    : String (required),  // full markdown/rich text
+  highlights     : [String],           // bullet points shown prominently: ["50+ components", "Fully responsive"]
+
+
+  // ── Section 4: Tech & Links (dev-project specific, optional for others) ──
+  techStack      : [String],           // ["React", "Node", "MongoDB"]
+  liveLink       : String,             // deployed demo URL
+  githubLink     : String,             // public repo (optional — seller's choice)
+
+
+  // ── Section 5: Docs & Setup ──
+  readmeContent  : String,             // markdown text — seller fills in the form field
+                                       // or pastes their existing README
+  setupSteps     : [String],           // ordered list: ["npm install", "cp .env.example .env", "npm run dev"]
+  requirements   : String,            // system requirements / prerequisites text
+  previewFile    : {                   // publicly visible sample (PDF, image)
+    url          : String,
+    publicId     : String,
+    fileType     : String              // 'pdf' | 'image'
+  },
+
+
+  // ── Section 6: Delivery ──
+  // (actual delivery file is NOT stored here — it lives in Transaction.deliveryFile)
+  // Seller uploads delivery file only AFTER payment, not during listing creation
+  deliveryFormat : String,             // "zip", "pdf", "docx", "github-link", "google-drive"
+  deliveryNote   : String,             // "Includes source code, assets, and documentation"
+
+
+  // ── Meta ──
+  status         : Enum ['draft', 'available', 'sold', 'inactive'] (default: draft),
+  completionScore: Number (0–100),     // computed: how complete the listing is
+  views          : Number (default: 0),
+  isFeatured     : Boolean (default: false),
+  createdAt      : Date,
+  updatedAt      : Date
+}
+Indexes: text index on (title, description, techStack, subject, domain, highlights)
+NOTE: 'draft' status means the seller saved but not published yet.
+      completionScore is recomputed on every save — drives a progress bar in the UI.
+
+
+---- Conversation ----
+{
+  _id            : ObjectId,
+  listing        : ObjectId (ref: Listing),
+  buyer          : ObjectId (ref: User),
+  seller         : ObjectId (ref: User),
+  lastMessage    : String,
+  lastMessageAt  : Date,
+  status         : Enum ['active', 'completed', 'cancelled'],
+  createdAt      : Date
+}
+Index: { listing, buyer } unique — one conversation per buyer per listing
+
+
+---- Message ----
+{
+  _id            : ObjectId,
+  conversation   : ObjectId (ref: Conversation),
+  sender         : ObjectId (ref: User),
+  text           : String,
+  type           : Enum ['text', 'offer', 'system'],
+  offer          : {                // only if type === 'offer'
+    amount       : Number,
+    status       : Enum ['pending','accepted','rejected','countered'],
+    counterAmount: Number
+  },
+  readBy         : [ObjectId],
+  createdAt      : Date
+}
+
+
+---- Transaction ----
+{
+  _id              : ObjectId,
+  conversation     : ObjectId (ref: Conversation),
+  listing          : ObjectId (ref: Listing),
+  buyer            : ObjectId (ref: User),
+  seller           : ObjectId (ref: User),
+  agreedPrice      : Number,
+  platformFee      : Number,       // e.g. 5% of agreedPrice
+  sellerPayout     : Number,       // agreedPrice - platformFee
+  razorpayOrderId  : String,
+  razorpayPaymentId: String,
+  status           : Enum [
+                      'pending-payment',
+                      'payment-done',
+                      'delivered',
+                      'completed',
+                      'disputed',
+                      'refunded'
+                     ],
+  deliveryFile     : {
+    publicId       : String,   // Cloudinary public_id (used to generate signed URL)
+    resourceType   : String,   // 'raw' for zip/pdf, 'image' for images
+    format         : String    // file extension
+  },
+  deliveryConfirmedAt: Date,
+  createdAt        : Date
+}
+
+
+---- Review ----
+{
+  _id            : ObjectId,
+  transaction    : ObjectId (ref: Transaction),
+  listing        : ObjectId (ref: Listing),
+  reviewer       : ObjectId (ref: User),  // buyer
+  seller         : ObjectId (ref: User),
+  rating         : Number (1–5),
+  comment        : String,
+  createdAt      : Date
+}
+
+
+
+
+================================================================================
+5. FOLDER STRUCTURE
+================================================================================
+
+
+BACKEND (server/)
+  server/
+  ├── config/
+  │   ├── db.js              # MongoDB connection
+  │   ├── redis.js           # Redis client setup
+  │   └── cloudinary.js      # Cloudinary SDK config (swap → s3.js later)
+  ├── controllers/
+  │   ├── auth.controller.js
+  │   ├── listing.controller.js
+  │   ├── conversation.controller.js
+  │   ├── message.controller.js
+  │   ├── offer.controller.js
+  │   ├── transaction.controller.js
+  │   └── review.controller.js
+  ├── middleware/
+  │   ├── auth.middleware.js  # Verify Auth0 JWT from cookie, attach req.user
+  │   ├── role.middleware.js  # isAdmin, isSeller
+  │   ├── upload.middleware.js# Multer config (memoryStorage)
+  │   └── error.middleware.js
+  ├── models/
+  │   ├── User.model.js       # auth0Id instead of password
+  │   ├── Listing.model.js
+  │   ├── Conversation.model.js
+  │   ├── Message.model.js
+  │   ├── Transaction.model.js
+  │   └── Review.model.js
+  ├── routes/
+  │   ├── auth.routes.js      # /callback, /logout, /me
+  │   ├── listing.routes.js
+  │   ├── conversation.routes.js
+  │   ├── message.routes.js
+  │   ├── transaction.routes.js
+  │   └── review.routes.js
+  ├── services/
+  │   ├── storage.service.js  # ABSTRACTION LAYER — uploadFile(), deleteFile(),
+  │   │                       # getSecureUrl(). Internally calls Cloudinary now,
+  │   │                       # swap internals to S3 later without touching callers.
+  │   ├── cloudinary.service.js  # Cloudinary-specific implementation
+  │   ├── redis.service.js    # pub, sub, get, set, del
+  │   ├── payment.service.js  # Razorpay order, verify
+  │   └── email.service.js    # Nodemailer send
+  ├── socket/
+  │   ├── index.js            # Socket.io init, attach to server
+  │   └── handlers/
+  │       ├── chat.handler.js
+  │       └── offer.handler.js
+  ├── utils/
+  │   ├── ApiError.js
+  │   ├── ApiResponse.js
+  │   └── asyncHandler.js
+  ├── .env
+  ├── package.json
+  └── server.js               # Entry point
+
+
+FRONTEND (client/)
+  client/
+  ├── public/
+  ├── src/
+  │   ├── api/
+  │   │   ├── axios.js        # Axios instance: withCredentials:true, base URL
+  │   │   ├── auth.api.js
+  │   │   ├── listing.api.js
+  │   │   └── conversation.api.js
+  │   ├── components/
+  │   │   ├── common/         # Button, Input, Modal, Badge, Spinner
+  │   │   ├── listing/        # ListingCard, ListingGrid, ListingForm
+  │   │   ├── chat/           # ChatWindow, MessageBubble, OfferCard
+  │   │   └── layout/         # Navbar, Footer, Sidebar
+  │   ├── pages/
+  │   │   ├── Home.jsx
+  │   │   ├── Browse.jsx
+  │   │   ├── ListingDetail.jsx
+  │   │   ├── CreateListing.jsx
+  │   │   ├── EditListing.jsx
+  │   │   ├── SellerProfile.jsx
+  │   │   ├── Dashboard.jsx   # My listings, purchases, conversations
+  │   │   ├── Inbox.jsx       # All conversations
+  │   │   ├── ChatRoom.jsx    # Single conversation + offer UI
+  │   │   ├── Checkout.jsx    # Payment page
+  │   │   └── Admin.jsx
+  │   ├── store/
+  │   │   ├── authStore.js    # Zustand: user (from Auth0 + our DB merged)
+  │   │   └── chatStore.js    # Zustand: active conversations
+  │   ├── hooks/
+  │   │   ├── useSocket.js
+  │   │   └── useAuth.js      # Wraps Auth0's useAuth0 + our user profile
+  │   ├── utils/
+  │   │   └── helpers.js
+  │   ├── App.jsx             # Auth0Provider wraps entire app
+  │   └── main.jsx
+  ├── .env
+  ├── package.json
+  └── vite.config.js
+
+
+
+
+================================================================================
+6. API ROUTE MAP
+================================================================================
+
+
+AUTH (Auth0-backed)
+  GET    /api/auth/callback          Auth0 redirects here after login;
+                                     backend verifies token, upserts User doc,
+                                     sets HttpOnly cookie, redirects to frontend
+  GET    /api/auth/me                (cookie protected) return our DB user object
+  POST   /api/auth/logout            clears cookie, calls Auth0 /v2/logout
+  PUT    /api/auth/profile           (cookie protected) update name, bio, institution
+  POST   /api/auth/avatar            (cookie protected, multipart) upload to Cloudinary
+
+
+LISTINGS
+  GET    /api/listings             (public, paginated, filterable)
+  GET    /api/listings/:id         (public, increments view count)
+  POST   /api/listings             (protected, multipart)
+  PUT    /api/listings/:id         (protected, owner only)
+  DELETE /api/listings/:id         (protected, owner only)
+  GET    /api/listings/my          (protected, seller's own listings)
+  GET    /api/listings/search?q=   (public, full-text search)
+
+
+CONVERSATIONS
+  POST   /api/conversations        (protected, buyer starts with listingId)
+  GET    /api/conversations        (protected, all my conversations)
+  GET    /api/conversations/:id    (protected, messages + metadata)
+
+
+MESSAGES
+  POST   /api/messages             (protected, send text/offer)
+  PUT    /api/messages/:id/offer   (protected, respond to offer)
+
+
+TRANSACTIONS
+  POST   /api/transactions/create-order   (protected, after offer accepted)
+  POST   /api/transactions/verify         (protected, Razorpay webhook verify)
+  POST   /api/transactions/:id/deliver    (protected, seller uploads file)
+  POST   /api/transactions/:id/confirm    (protected, buyer confirms receipt)
+  GET    /api/transactions/:id/download   (protected, get presigned S3 URL)
+
+
+REVIEWS
+  POST   /api/reviews                     (protected, after transaction complete)
+  GET    /api/reviews/seller/:sellerId    (public)
+
+
+ADMIN
+  GET    /api/admin/listings         (admin only)
+  GET    /api/admin/users            (admin only)
+  DELETE /api/admin/listings/:id     (admin only)
+  PUT    /api/admin/users/:id/verify (admin only, toggle verified seller)
+
+
+
+
+================================================================================
+7. PHASE 1 — CORE LISTINGS & AUTH
+================================================================================
+
+
+Goal: A working site where sellers can list projects/notes and buyers can browse.
+
+
+BACKEND TASKS
+  [1] Init Node project
+      - npm init, install: express mongoose dotenv
+        multer cloudinary express-jwt jwks-rsa cookie-parser
+        cors helmet morgan express-rate-limit
+  [2] server.js — Express app, connect MongoDB, attach routes, error middleware
+      - cookie-parser middleware (to read HttpOnly cookies)
+      - cors({ origin: FRONTEND_URL, credentials: true })  ← credentials:true is
+        mandatory for cookies to be sent cross-origin
+  [3] config/db.js — Mongoose connect with retry logic
+  [4] config/cloudinary.js — Cloudinary v2 SDK config with cloud_name, api_key, api_secret
+  [5] Auth0 setup
+      - Create Auth0 Application (Regular Web App) in Auth0 dashboard
+      - Set Allowed Callback URLs: http://localhost:5000/api/auth/callback
+      - Set Allowed Logout URLs: http://localhost:5173
+      - Note down: DOMAIN, CLIENT_ID, CLIENT_SECRET, AUDIENCE
+  [6] auth.middleware.js — verify Auth0 JWT from cookie
+      - Use express-jwt + jwks-rsa to verify against Auth0 JWKS endpoint
+      - Decoded payload attached as req.auth (contains sub, email, name)
+      - Look up or create User in MongoDB by auth0Id (req.auth.sub)
+      - Attach full DB user as req.user
+  [7] auth.routes.js
+      - GET /callback: exchange Auth0 code for tokens, set cookie, redirect
+        Cookie flags: httpOnly:true, secure:true(prod), sameSite:'strict', maxAge:7d
+      - GET /me: return req.user (our DB user object)
+      - POST /logout: res.clearCookie('token'), redirect to Auth0 logout URL
+  [8] User model (auth0Id, no password field)
+  [9] Listing model (full schema — images as Cloudinary objects)
+  [10] listing.routes + listing.controller
+      - GET /listings: pagination, filter, sort
+      - POST /listings: multer + Cloudinary upload, save listing doc
+      - GET /listings/:id: populate seller (name, avatar, rating)
+      - PUT/DELETE /listings/:id: owner check
+  [11] storage.service.js — abstraction layer
+      - uploadFile(buffer, folder, options) → { url, publicId }
+      - deleteFile(publicId, resourceType)
+      - getSecureUrl(publicId, expiresInSeconds) → signed URL
+      Internally calls cloudinary.service.js today.
+      When migrating to S3: only cloudinary.service.js is replaced,
+      storage.service.js interface stays identical, zero changes in controllers.
+  [12] cloudinary.service.js
+      - uploadToCloudinary(buffer, folder, resourceType)
+        → uses upload_stream with buffer
+      - deleteFromCloudinary(publicId, resourceType)
+      - generateSignedUrl(publicId, expiresAt)
+        → cloudinary.utils.private_download_url() for private files
+  [13] upload.middleware.js — Multer memoryStorage, limits: 5 images × 5MB each
+
+
+FRONTEND TASKS
+  [1] Vite + React setup, install: axios react-router-dom zustand
+        @tanstack/react-query tailwindcss react-hook-form zod
+        react-dropzone react-hot-toast @auth0/auth0-react
+  [2] Tailwind config, base styles
+  [3] Wrap App in Auth0Provider (main.jsx)
+        <Auth0Provider domain={...} clientId={...} authorizationParams={{
+          redirect_uri: window.location.origin,
+          audience: AUTH0_AUDIENCE
+        }}>
+  [4] Axios instance: baseURL + withCredentials: true (sends cookie automatically)
+      No manual token attachment needed — cookie is sent by browser
+  [5] useAuth.js hook
+      - Uses Auth0's useAuth0() for login/logout UI state
+      - On isAuthenticated: calls GET /api/auth/me to get our DB user
+      - Stores DB user in Zustand authStore
+  [6] Auth flow:
+      - loginWithRedirect() → Auth0 hosted login page
+      - Auth0 redirects back → our /callback sets cookie
+      - Frontend now authenticated for all requests
+  [7] Protected route wrapper — checks authStore.user
+  [8] Navbar with auth state (login button / user avatar + dropdown)
+  [9] Browse, ListingCard, ListingDetail, CreateListing pages (same as before)
+  [10] My Listings dashboard tab
+
+
+DELIVERABLE: Deployed app with Auth0 login (email + Google), HttpOnly cookie
+session, Cloudinary image uploads, and full listing CRUD.
+
+
+
+
+================================================================================
+8. PHASE 2 — REAL-TIME MESSAGING & NEGOTIATION
+================================================================================
+
+
+Goal: Buyer and seller can chat in real time and negotiate price.
+
+
+BACKEND TASKS
+  [1] Install: socket.io redis ioredis
+  [2] config/redis.js — ioredis client (Upstash URL in prod, localhost in dev)
+  [3] socket/index.js
+      - Attach Socket.io to HTTP server
+      - On connection: authenticate socket by reading the HttpOnly cookie
+        from the handshake headers, verify JWT same way as auth.middleware.js
+      - Store userId → socketId mapping in Redis hash (HSET online-users)
+      - On disconnect: remove from Redis
+  [4] Conversation model + routes
+      - POST /conversations: find or create conversation for (listing, buyer)
+      - GET /conversations: user's conversations, sorted by lastMessageAt
+      - GET /conversations/:id: with messages (paginated, newest first)
+  [5] Message model + routes
+      - POST /messages: save message, emit to room via Redis pub/sub
+      - PUT /messages/:id/offer: seller responds to offer
+  [6] Redis Pub/Sub for message fanout
+      - Publisher: when a message is saved, publish to channel
+        "conversation:{conversationId}"
+      - Subscriber (in socket handler): subscribed to that channel,
+        emits to all sockets in that conversation room
+      - Why Redis? If you have multiple server instances, Socket.io alone
+        won't fanout cross-instance. Redis bridges them.
+  [7] socket/handlers/chat.handler.js
+      - join-room: socket joins room "conv:{id}", Redis SUBSCRIBE
+      - send-message: validate, save to DB, PUBLISH to Redis channel
+      - leave-room: socket leaves, Redis UNSUBSCRIBE if no one left
+  [8] socket/handlers/offer.handler.js
+      - On offer message: emit 'new-offer' event to room
+      - On offer response (accept/reject/counter): update message.offer.status,
+        emit 'offer-updated' to room
+
+
+FRONTEND TASKS
+  [1] socket.io-client setup in hooks/useSocket.js
+      - Connect with: io(SOCKET_URL, { withCredentials: true })
+        Browser sends the HttpOnly cookie automatically — no manual token needed
+      - Expose emit/on helpers
+      - Auto-reconnect logic
+  [2] Inbox page — list of all conversations with last message + unread count
+  [3] ChatRoom page
+      - Join room on mount, leave on unmount
+      - Message list (scroll to bottom on new message)
+      - Text input + send button
+      - OfferCard component — shows offer amount, Accept / Reject / Counter buttons
+      - "Make an Offer" button opens a modal with price input
+  [4] Zustand chatStore: activeConversation, messages[], unread counts
+  [5] "Connect with Seller" button on ListingDetail
+      - Calls POST /conversations with listingId
+      - Redirects to /inbox/:conversationId
+  [6] Unread badge on Navbar Inbox icon (via socket 'new-message' event)
+  [7] Typing indicator (optional, emit 'typing' event, debounce clear)
+
+
+DELIVERABLE: Fully working real-time chat between buyer and seller,
+with offer cards that both parties can respond to.
+
+
+
+
+================================================================================
+9. PHASE 3 — TRANSACTION & SECURE DELIVERY
+================================================================================
+
+
+Goal: Money changes hands securely, file is delivered, both sides confirmed.
+
+
+BACKEND TASKS
+  [1] Install: razorpay nodemailer
+  [2] Razorpay account setup: get key_id + key_secret
+  [3] services/payment.service.js
+      - createOrder(amount, currency, receipt)  → Razorpay order object
+      - verifySignature(orderId, paymentId, signature) → boolean
+  [4] Transaction model (see schema above)
+  [5] POST /transactions/create-order
+      - Triggered after buyer + seller agree on price
+      - Validate conversation exists and offer is accepted
+      - Create Razorpay order
+      - Save Transaction doc (status: pending-payment)
+      - Return { orderId, amount, key_id } to frontend
+  [6] POST /transactions/verify
+      - Receive Razorpay callback: orderId, paymentId, signature
+      - Verify HMAC signature
+      - Update Transaction status → payment-done
+      - Notify seller via socket emit 'payment-received' + email
+  [7] POST /transactions/:id/deliver
+      - Seller uploads the final file (Multer → Cloudinary, resource_type:'raw',
+        type:'authenticated' — makes it private/signed-access only)
+      - Store { publicId, resourceType, format } in transaction.deliveryFile
+      - Update status → delivered
+      - Notify buyer via socket + email
+  [8] GET /transactions/:id/download
+      - Verify requester is the buyer
+      - Verify status is 'delivered' or 'completed'
+      - Call storage.service.getSecureUrl(publicId, 600) → Cloudinary signed URL
+        (expires in 10 min — same behaviour as S3 presigned URL)
+      - Return URL (never expose raw publicId to client)
+      NOTE: When migrating to S3, only storage.service.js internals change.
+      This route, and all other callers, stay exactly the same.
+  [9] POST /transactions/:id/confirm
+      - Buyer confirms they received and are satisfied
+      - Update status → completed
+      - Trigger payout to seller (manual or Razorpay Route)
+      - Mark listing as sold
+      - Emit 'transaction-complete' to both parties
+      - Send confirmation emails to both
+  [10] Dispute flow (simple version)
+      - PUT /transactions/:id/dispute
+      - Sets status → disputed, notifies admin
+
+
+FRONTEND TASKS
+  [1] Post offer-accepted: show "Proceed to Payment" button in ChatRoom
+  [2] Checkout page
+      - Shows agreed price, platform fee, total
+      - Loads Razorpay checkout.js (CDN)
+      - On success: calls /verify endpoint
+  [3] Transaction status page (polling or socket)
+      - pending-payment → payment-done → delivered → completed
+  [4] Buyer: "Download File" button → hits /download → opens presigned URL in new tab
+  [5] Buyer: "Confirm Receipt" button → hits /confirm
+  [6] Toast notifications for all transaction state changes
+  [7] Email templates (Nodemailer):
+      - Payment received (to seller)
+      - File delivered (to buyer)
+      - Transaction complete (to both)
+
+
+DELIVERABLE: End-to-end flow — negotiate → pay → deliver → confirm.
+Both buyer and seller get what they came for.
+
+
+
+
+================================================================================
+10. PHASE 4 — DISCOVERY, TRUST & SCALE
+================================================================================
+
+
+Goal: Make the platform findable, trustworthy, and fast at scale.
+
+
+BACKEND TASKS
+  [1] Full-text search
+      - Mongoose text index on Listing: title, description, techStack,
+        subject, domain, institution
+      - GET /listings/search?q=react+projects&category=dev-project
+      - Score-based relevance sort ($text, $meta: "textScore")
+  [2] Reviews
+      - POST /reviews: only allowed if transaction status === 'completed'
+        and no review exists for that transaction yet
+      - GET /reviews/seller/:id: paginated, sorted by newest
+      - On review creation: update User.averageRating and reviewCount
+        (use MongoDB aggregation pipeline)
+  [3] Redis caching for hot endpoints
+      - Cache GET /listings (with filter hash as key), TTL 60s
+      - Cache individual listing detail, TTL 120s
+      - Invalidate on listing update/delete
+      - Cache user profile, TTL 300s
+  [4] Rate limiting per IP (already done via express-rate-limit in Phase 1)
+  [5] Admin routes
+      - GET /admin/listings: all listings, filterable, with seller info
+      - DELETE /admin/listings/:id: remove with reason (notify seller by email)
+      - PUT /admin/users/:id/verify: toggle isVerifiedSeller
+      - GET /admin/transactions: all transactions, filterable by status
+  [6] Listing analytics
+      - Track views (increment on GET /listings/:id)
+      - Track saves/bookmarks (add Bookmark model)
+  [7] Saved/Bookmarked listings
+      - POST /bookmarks { listingId }
+      - DELETE /bookmarks/:listingId
+      - GET /bookmarks (user's saved listings)
+  [8] Notifications model
+      - Store in-app notifications (new message, offer, payment, review)
+      - GET /notifications (user's unread notifications)
+      - PUT /notifications/read-all
+
+
+FRONTEND TASKS
+  [1] Search bar in Navbar — debounced input → /listings/search
+      - Show results in dropdown (title, category, price)
+      - Full results on /browse?q=...
+  [2] Advanced filter sidebar on Browse page
+      - Category, domain, tech stack checkboxes
+      - Price range slider
+      - Institution text input
+      - Rating filter (4+ stars seller)
+  [3] Seller profile page (public)
+      - Avatar, name, bio, institution, verified badge
+      - Stats: total sales, average rating, member since
+      - Review list
+      - Active listings grid
+  [4] Review submission modal (post-transaction)
+      - Star rating widget + comment textarea
+      - Submit → show on seller profile
+  [5] Bookmarks page — saved listings grid
+  [6] Notifications dropdown (bell icon in Navbar)
+      - Unread count badge
+      - Click → mark as read
+  [7] Admin panel (role-gated route)
+      - Listings table with flag/remove actions
+      - Users table with verify toggle
+  [8] SEO basics
+      - React Helmet for per-page title/meta
+      - Sitemap generation (optional)
+
+
+
+
+================================================================================
+11. REDIS ARCHITECTURE
+================================================================================
+
+
+Two distinct uses of Redis in this project:
+
+
+A. PUB/SUB (for real-time messaging)
+   - When a message is sent via the API:
+     1. Message is saved to MongoDB
+     2. Server publishes to Redis channel: "conv:{conversationId}"
+     3. All server instances that have subscribers for that channel
+        get the event
+     4. They emit it via Socket.io to the relevant clients
+   - This enables horizontal scaling — multiple server instances
+     still deliver messages to the right user regardless of which
+     server their socket is connected to
+
+
+   Redis key pattern: channel name "conv:{conversationId}"
+
+
+B. CACHING (for performance)
+   - Cache listings: "listings:{filterHash}"  TTL: 60s
+   - Cache listing detail: "listing:{id}"      TTL: 120s
+   - Cache user profile: "user:{id}"           TTL: 300s
+   - Online users: HSET "online-users" userId socketId
+   - Unread count: INCR "unread:{userId}:{convId}"
+
+
+   On listing create/update/delete → DEL "listings:*" (pattern delete)
+   On message read → DEL "unread:{userId}:{convId}"
+
+
+Redis client: ioredis (supports both pub/sub and regular commands)
+   - Need TWO client instances: one for pub/sub (blocks), one for regular ops
+   - In dev: redis://localhost:6379
+   - In prod: Upstash Redis (free tier available, HTTP + Redis protocol)
+
+
+
+
+================================================================================
+12. SOCKET.IO ARCHITECTURE
+================================================================================
+
+
+Connection lifecycle:
+  1. Client connects: io({ auth: { token: JWT } })
+  2. Server middleware verifies JWT, attaches socket.user = decoded
+  3. Server stores: HSET online-users {userId} {socketId} in Redis
+  4. Server emits 'connected' with user data
+
+
+Room strategy:
+  - Each conversation is a Socket.io room: "conv:{conversationId}"
+  - User joins room on opening ChatRoom page
+  - User leaves room on closing ChatRoom page
+
+
+Events (client → server):
+  - 'join-room'     { conversationId }
+  - 'leave-room'    { conversationId }
+  - 'send-message'  { conversationId, text, type }
+  - 'send-offer'    { conversationId, amount }
+  - 'respond-offer' { messageId, action: 'accept'|'reject'|'counter', counterAmount }
+  - 'typing'        { conversationId }
+  - 'stop-typing'   { conversationId }
+
+
+Events (server → client):
+  - 'new-message'   { message object with sender info }
+  - 'offer-updated' { messageId, newStatus, counterAmount }
+  - 'payment-received' { transactionId } → to seller
+  - 'file-delivered'   { transactionId, downloadUrl } → to buyer
+  - 'transaction-complete' { transactionId } → to both
+  - 'typing'        { conversationId, userId }
+  - 'stop-typing'   { conversationId, userId }
+  - 'user-online'   { userId }
+  - 'user-offline'  { userId }
+
+
+Scaling note:
+  Use socket.io-redis adapter in production so all server instances
+  share the same rooms:
+    npm install @socket.io/redis-adapter
+    io.adapter(createAdapter(pubClient, subClient))
+
+
+
+
+================================================================================
+13. AUTH0 + JWT COOKIE ARCHITECTURE
+================================================================================
+
+
+WHY AUTH0?
+  - No password storage, hashing, reset flows to build — Auth0 handles it all
+  - Get Google, GitHub, LinkedIn login for free with one toggle in the dashboard
+  - Built-in brute-force protection, anomaly detection, MFA (future)
+  - Scales to millions of users without touching our backend auth code
+  - Allows adding SSO for enterprise buyers later (Phase 4+)
+
+
+FLOW (step by step)
+  1. User clicks "Login" on frontend
+  2. Auth0 loginWithRedirect() sends user to Auth0's hosted login page
+  3. User logs in (email/password or Google)
+  4. Auth0 redirects to: GET /api/auth/callback?code=xxx
+  5. Backend exchanges code for tokens using Auth0's /oauth/token endpoint
+  6. Backend decodes the ID token → gets { sub, email, name, picture }
+  7. Backend does: User.findOneAndUpdate({ auth0Id: sub }, {...}, { upsert: true })
+     This auto-creates a User doc on first login, finds existing on subsequent logins
+  8. Backend creates a signed app-level JWT (optional — can also use Auth0 token directly)
+     OR sets the Auth0 access token directly as cookie
+  9. res.cookie('token', accessToken, {
+       httpOnly: true,      ← JS cannot read this — XSS protection
+       secure: true,        ← HTTPS only in prod
+       sameSite: 'strict',  ← CSRF protection
+       maxAge: 7 * 24 * 60 * 60 * 1000  ← 7 days
+     })
+  10. Redirect to frontend (e.g. /dashboard)
+  11. All subsequent API requests: browser sends cookie automatically
+  12. auth.middleware.js verifies the token from cookie on every protected route
+
+
+COOKIE VS LOCALSTORAGE — WHY COOKIE?
+  - localStorage is readable by ANY JavaScript on the page — XSS attack steals token
+  - HttpOnly cookie is invisible to JavaScript — XSS cannot steal it
+  - SameSite=Strict prevents CSRF — cookie only sent on same-site requests
+  - Works seamlessly with withCredentials: true on Axios and Socket.io
+
+
+AUTH MIDDLEWARE (auth.middleware.js)
+  const token = req.cookies.token;
+  if (!token) throw new ApiError(401, 'Not authenticated');
+  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  // or verify Auth0 token against JWKS:
+  //   use express-jwt + jwks-rsa pointing to https://{AUTH0_DOMAIN}/.well-known/jwks.json
+  const user = await User.findOne({ auth0Id: decoded.sub });
+  req.user = user;
+
+
+LOGOUT FLOW
+  1. Frontend calls POST /api/auth/logout
+  2. Backend: res.clearCookie('token')
+  3. Redirect to: https://{AUTH0_DOMAIN}/v2/logout?returnTo={FRONTEND_URL}
+  4. Auth0 clears its own session too
+
+
+ROLE MANAGEMENT
+  - Roles stored in our MongoDB User doc (not in Auth0 metadata)
+  - After token verification, req.user has .role field from DB
+  - role.middleware.js checks req.user.role for admin/seller gating
+  - To promote a user to admin: update User.role in DB via admin panel
+
+
+AUTH0 DASHBOARD SETTINGS
+  - Application Type: Regular Web Application
+  - Allowed Callback URLs: http://localhost:5000/api/auth/callback,
+                            https://api.yourapp.com/api/auth/callback
+  - Allowed Logout URLs: http://localhost:5173, https://yourapp.com
+  - Allowed Web Origins: http://localhost:5173, https://yourapp.com
+  - Enable: Username-Password-Authentication connection
+  - Enable: Google social connection (one click)
+
+
+
+
+================================================================================
+14. CLOUDINARY STRATEGY (S3 MIGRATION PATH)
+================================================================================
+
+
+WHY CLOUDINARY NOW?
+  - Free tier: 25 credits/month (~25GB storage + 25GB bandwidth)
+  - No AWS account setup, IAM policies, or bucket config needed
+  - Built-in image transformations (auto format, quality, resize on the fly)
+  - Signed URLs for private file access — same concept as S3 presigned URLs
+  - SDK is simpler for beginners: one uploadStream call vs PutObjectCommand
+
+
+CLOUDINARY SETUP
+  - Create free account at cloudinary.com
+  - Get: CLOUD_NAME, API_KEY, API_SECRET from dashboard
+  - Two resource types used:
+    PUBLIC  → resource_type:'image', type:'upload' (listing images, avatars, previews)
+    PRIVATE → resource_type:'raw',   type:'authenticated' (delivery files: zip, pdf)
+
+
+UPLOAD FLOW (backend)
+  1. Multer stores file in memory (no disk I/O)
+  2. storage.service.uploadFile(buffer, folder, options) is called
+  3. Internally: cloudinary.uploader.upload_stream({ folder, resource_type, type })
+  4. Returns { url, public_id } — url stored in MongoDB for public files,
+     public_id stored for private files (URL never exposed directly)
+
+
+PUBLIC FILES (listing images, previews, avatars)
+  - Folder structure: projbazaar/listings/{listingId}/images/
+                      projbazaar/listings/{listingId}/preview/
+                      projbazaar/avatars/{userId}/
+  - URL in MongoDB e.g.: https://res.cloudinary.com/{cloud}/image/upload/v.../projbazaar/...
+  - On listing delete: call cloudinary.api.delete_resources([publicId1, publicId2, ...])
+
+
+PRIVATE FILES (delivery files — the actual product being sold)
+  - Folder: projbazaar/deliveries/{transactionId}/
+  - Uploaded with type:'authenticated' — not publicly accessible
+  - To give buyer access: generate a signed URL server-side:
+      cloudinary.utils.private_download_url(publicId, format, {
+        resource_type: 'raw',
+        expires_at: Math.floor(Date.now()/1000) + 600  // 10 min expiry
+      })
+  - This signed URL works exactly like an S3 presigned URL
+
+
+IMAGE TRANSFORMATIONS (bonus Cloudinary feature)
+  - Auto-format and auto-quality on listing thumbnails:
+    https://res.cloudinary.com/{cloud}/image/upload/f_auto,q_auto,w_400/{publicId}
+  - Just change the URL — no re-upload needed
+
+
+ABSTRACTION LAYER — HOW MIGRATION TO S3 WORKS
+  All controllers only call storage.service.js — they never import Cloudinary directly.
+  storage.service.js exposes:
+    uploadFile(buffer, folder, options) → { url, publicId }
+    deleteFile(publicId, resourceType)
+    getSecureUrl(publicId, expiresInSeconds) → signed URL
+
+
+  To migrate to S3:
+    1. Create s3.service.js implementing the same 3 functions
+    2. In storage.service.js, change the import from cloudinary.service to s3.service
+    3. Update the MongoDB schema: publicId → S3 object key (same field, same position)
+    4. Update env vars
+    That's it. Zero changes in controllers, routes, or models.
+
+
+  Migration checklist (when ready for S3):
+    □ Create S3 buckets (public + private)
+    □ Set up IAM user with limited S3 permissions
+    □ Install @aws-sdk/client-s3 + @aws-sdk/s3-request-presigner
+    □ Write s3.service.js with same interface as cloudinary.service.js
+    □ Update storage.service.js import
+    □ Migrate existing Cloudinary files to S3 (one-time script)
+    □ Update env vars, redeploy
+
+
+
+
+================================================================================
+15. SCALABILITY & FUTURE-PROOFING GUIDE
+================================================================================
+
+
+This section documents every architectural decision made with future scale in mind,
+so new features can be added without rewriting existing code.
+
+
+STORAGE ABSTRACTION (already done above)
+  - storage.service.js is a provider-agnostic interface
+  - Swap Cloudinary → S3 → GCS without touching a single controller
+
+
+AUTH ABSTRACTION
+  - Auth0 handles identity; our User model is the source of truth for app data
+  - Adding new login methods (Apple, Microsoft, LinkedIn): toggle in Auth0 dashboard
+  - Adding SSO for enterprise customers: Auth0 Enterprise connections, zero backend change
+  - Adding MFA: enable in Auth0 dashboard, zero backend change
+
+
+DATABASE SCALABILITY
+  - All Mongoose queries use indexed fields — add indexes early (see schema section)
+  - mongoose-paginate-v2 for consistent cursor-based pagination (add in Phase 4)
+  - When collection grows: enable MongoDB Atlas auto-scaling (M10+)
+  - Sharding strategy (if ever needed): shard Listing on category + createdAt,
+    shard Message on conversationId
+
+
+REDIS SCALABILITY
+  - Pub/Sub already designed for multi-instance via @socket.io/redis-adapter
+  - Add Redis Cluster (Upstash supports it) when single-node hits limits
+  - All cache keys use consistent naming: "{model}:{id}" or "{model}:{filterHash}"
+    — easy to scan and invalidate
+
+
+API VERSIONING (future-proof from day 1)
+  - Mount all routes under /api/v1/ from the start
+  - When breaking changes needed: add /api/v2/ routes, deprecate v1 gradually
+  - Version in URL (not header) — simpler for clients
+
+
+FEATURE FLAGS
+  - Add a simple FeatureFlag model: { name, enabled, description }
+  - Wrap experimental features: if (await isEnabled('payment_escrow')) { ... }
+  - Toggle without deployment from admin panel
+  - Future: use LaunchDarkly or Unleash for more sophisticated flags
+
+
+QUEUES (Phase 4+ — when email/notification volume grows)
+  - Replace direct Nodemailer calls with a job queue
+  - Use Bull (Redis-backed) or BullMQ for background jobs:
+      emailQueue.add('send-transaction-email', { to, subject, template, data })
+  - Worker process handles retries, concurrency, failure logging
+  - Same pattern for: image processing jobs, payout triggers, report generation
+
+
+ADDING NEW LISTING CATEGORIES (zero code change design)
+  - Category is an Enum in Listing schema
+  - To add a new category (e.g. 'internship-report'):
+    1. Add to Enum in Listing.model.js
+    2. Add category config object in a shared config/categories.js file
+       (defines extra fields, price range, display name)
+    3. Frontend reads config to render the right form fields dynamically
+  - No controller or route changes needed
+
+
+MICROSERVICES MIGRATION PATH (when monolith outgrows single server)
+  Current monolith is already logically separated by domain:
+    auth/ → extract to Auth Service
+    listings/ → Listing Service
+    conversations/ + messages/ → Messaging Service
+    transactions/ → Payment Service
+  Each service already has its own models, routes, controllers.
+  When splitting: replace direct imports with HTTP calls or message queue events.
+
+
+HORIZONTAL SCALING
+  - Backend is stateless (no in-memory session — cookie + DB + Redis only)
+  - Can run N identical Express instances behind a load balancer (Nginx / ALB)
+  - Socket.io scaled via @socket.io/redis-adapter (already noted in section 12)
+  - Cloudinary and MongoDB Atlas are already distributed — no change needed
+
+
+MONITORING & OBSERVABILITY (add in Phase 4)
+  - Logging: Winston (structured JSON logs) → ship to Datadog or Logtail
+  - APM: Sentry (error tracking, performance) — install SDK, done
+  - Uptime: BetterUptime or UptimeRobot (free tier)
+  - DB monitoring: MongoDB Atlas built-in metrics
+  - API rate limiting already in place via express-rate-limit (Phase 1)
+
+
+PLANNED FUTURE FEATURES (design now, build later)
+  - Subscription model: sellers pay monthly for unlimited listings
+  - Escrow via Razorpay Route (automatic payout split)
+  - Dispute resolution system (Phase 3 stub already has disputed status)
+  - AI-powered listing quality score (check completeness, suggest improvements)
+  - Referral program (User model has a referredBy field slot ready)
+  - Mobile app: React Native reusing all API endpoints (cookie auth works on mobile too)
+
+
+
+
+================================================================================
+16. CATEGORIES & LISTING TYPES
+================================================================================
+
+
+CATEGORY: dev-project
+  Domain examples: Web Dev, Mobile, Machine Learning, Game Dev,
+                   Blockchain, Embedded, DevOps, Data Science
+  Extra fields: techStack[], liveLink, githubLink
+  Typical price: ₹200 – ₹5000
+
+
+CATEGORY: college-notes
+  Extra fields: subject, institution, semester, branch
+  Domain examples: CSE, ECE, Mechanical, Civil, BCA, MCA
+  Typical price: ₹50 – ₹500
+
+
+CATEGORY: school-notes
+  Extra fields: subject, class (6–12), board (CBSE, ICSE, State)
+  Domain examples: Physics, Chemistry, Maths, Biology, English, History
+  Typical price: ₹20 – ₹200
+
+
+CATEGORY: pyq
+  Extra fields: subject, year, institution or board, class/semester
+  Domain examples: JEE, NEET, GATE, University Exams, Board Exams
+  Typical price: ₹30 – ₹300
+
+
+CATEGORY: syllabus
+  Extra fields: subject, institution or board, class/semester, year
+  Typical price: ₹0 – ₹100 (often free)
+
+
+Listing status flow:
+  available → (offer accepted + payment done) → sold
+  available → (seller deactivates) → inactive
+  sold / inactive → (seller reactivates) → available
+
+
+
+
+================================================================================
+17. DEPLOYMENT PLAN
+================================================================================
+
+
+DEVELOPMENT
+  - Backend: localhost:5000
+  - Frontend: localhost:5173 (Vite)
+  - MongoDB: local or MongoDB Atlas free tier
+  - Redis: local (Docker: docker run -p 6379:6379 redis)
+
+
+STAGING / PRODUCTION
+
+
+  Frontend
+  - Platform: Vercel
+  - Build: npm run build → dist/
+  - Env: VITE_API_URL=https://api.yourapp.com
+
+
+  Backend
+  - Platform: Render (free tier) or Railway
+  - Start command: node server.js
+  - Env: all secrets in platform env vars
+
+
+  Database
+  - MongoDB Atlas M0 (free) → upgrade to M10 for production
+  - Enable VPC peering or IP allowlist for backend only
+
+
+  Redis
+  - Upstash (free tier: 10k commands/day) for managed Redis
+  - Supports both pub/sub and caching
+
+
+  File Storage
+  - Cloudinary free tier (25GB storage + 25GB bandwidth/month)
+  - Upgrade to paid plan or migrate to S3 when limits approached
+  - Migration is a single service file swap (see section 14)
+
+
+  Domain
+  - Namecheap or GoDaddy for domain
+  - Vercel handles SSL for frontend
+  - Render/Railway handles SSL for backend
+
+
+  CI/CD
+  - GitHub Actions (optional, Phase 4)
+  - Auto-deploy on push to main via Vercel + Render webhooks
+
+
+Estimated free-tier monthly cost: ~$0
+  (MongoDB Atlas M0 + Upstash free + Render free + Vercel free + Cloudinary free)
+
+
+
+
+================================================================================
+18. ENVIRONMENT VARIABLES REFERENCE
+================================================================================
+
+
+Backend (.env)
+
+
+  # Server
+  PORT=5000
+  NODE_ENV=development
+  FRONTEND_URL=http://localhost:5173
+
+
+  # MongoDB
+  MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/projbazaar
+
+
+  # Auth0
+  AUTH0_DOMAIN=your-tenant.auth0.com
+  AUTH0_CLIENT_ID=...
+  AUTH0_CLIENT_SECRET=...
+  AUTH0_AUDIENCE=https://api.projbazaar.com
+  AUTH0_CALLBACK_URL=http://localhost:5000/api/auth/callback
+
+
+  # Cookie / JWT signing
+  COOKIE_SECRET=a_long_random_secret_for_signing_cookies
+  # If wrapping Auth0 token in our own JWT:
+  JWT_SECRET=another_long_random_secret
+  JWT_EXPIRES_IN=7d
+
+
+  # Redis
+  REDIS_URL=redis://localhost:6379
+  # For Upstash: rediss://:{password}@{host}:{port}
+
+
+  # Cloudinary
+  CLOUDINARY_CLOUD_NAME=your_cloud_name
+  CLOUDINARY_API_KEY=...
+  CLOUDINARY_API_SECRET=...
+
+
+  # Razorpay
+  RAZORPAY_KEY_ID=rzp_test_...
+  RAZORPAY_KEY_SECRET=...
+
+
+  # Email (Nodemailer)
+  SMTP_HOST=smtp.gmail.com
+  SMTP_PORT=587
+  SMTP_USER=your@gmail.com
+  SMTP_PASS=app_specific_password
+  FROM_EMAIL=noreply@projbazaar.com
+
+
+  # Platform fee
+  PLATFORM_FEE_PERCENT=5
+
+
+Frontend (.env)
+
+
+  VITE_API_URL=http://localhost:5000/api
+  VITE_SOCKET_URL=http://localhost:5000
+  VITE_AUTH0_DOMAIN=your-tenant.auth0.com
+  VITE_AUTH0_CLIENT_ID=...
+  VITE_AUTH0_AUDIENCE=https://api.projbazaar.com
+  VITE_RAZORPAY_KEY_ID=rzp_test_...
+
+
+
+
+================================================================================
+  END OF PLAN — Total estimated build time: 8–12 weeks (solo, part-time)
+  Phase 1: 2–3 weeks | Phase 2: 2 weeks | Phase 3: 2–3 weeks | Phase 4: 2–3 weeks
+  v2.0 changes: Auth0 + HttpOnly cookie auth, Cloudinary storage, S3 migration
+  path documented, scalability guide added (section 15)
+================================================================================
