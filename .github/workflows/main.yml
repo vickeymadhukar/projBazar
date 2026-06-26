@@ -1,0 +1,72 @@
+name: project bazar
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    strategy:
+      matrix:
+        node-version: [24.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # =========================
+      # Backend
+      # =========================
+
+      - name: Install Backend Dependencies
+        working-directory: ./server
+        run: npm install
+
+      - name: Create Backend .env
+        working-directory: ./server
+        run: |
+          echo "${{ secrets.BACKEND_ENV }}" > .env
+
+      - name: Start Backend with PM2
+        working-directory: ./server
+        run: |
+          /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 restart projbazaar-api --update-env || /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 start src/server.js --name projbazaar-api
+          /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 save
+
+      # =========================
+      # Frontend
+      # =========================
+
+      - name: Install Frontend Dependencies
+        working-directory: ./client
+        run: npm install
+
+      - name: Create Frontend .env
+        working-directory: ./client
+        run: |
+          echo "${{ secrets.FRONTEND_ENV }}" > .env
+
+      - name: Build Frontend
+        working-directory: ./client
+        run: npm run build
+
+      # =========================
+      # Deploy to Nginx
+      # =========================
+
+      - name: Deploy Frontend to Nginx
+        run: |
+          sudo rm -rf /var/www/html/*
+          sudo cp -r client/dist/* /var/www/html/
+
+      - name: Reload Nginx
+        run: |
+          sudo systemctl reload nginx
