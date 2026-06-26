@@ -38,8 +38,7 @@ jobs:
       - name: Start Backend with PM2
         working-directory: ./server
         run: |
-          /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 restart projbazaar-api --update-env || /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 start src/server.js --name projbazaar-api
-          /home/ubuntu/.nvm/versions/node/v24.16.0/bin/pm2 save
+         /home/ubuntu/.nvm/versions/node/v24.18.0/bin/pm2 restart Backend || /home/ubuntu/.nvm/versions/node/v24.18.0/bin/pm2 start server.js --name Backend
 
       # =========================
       # Frontend
